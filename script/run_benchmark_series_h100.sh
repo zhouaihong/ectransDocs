@@ -193,6 +193,9 @@ screen_progress_filter() {
   awk '
     function emit(){print;fflush()}
     /^yhrun:/ {emit();next}
+    # 260717 wrqt begin 把每轮开始标记显示到终端
+    /^__EC_RUN_BEGIN=/ {sub(/^__EC_RUN_BEGIN=/,"running        : ");emit();next}
+    # 260717 wrqt end 把每轮开始标记显示到终端
     /^__EC_BENCH_START_TIMESTAMP=/ {sub(/^__EC_BENCH_START_TIMESTAMP=/,"benchmark_start=");emit();next}
     /^__EC_BENCH_END_TIMESTAMP=/ {sub(/^__EC_BENCH_END_TIMESTAMP=/,"benchmark_end=");emit();next}
     /^__EC_BENCH_EXIT_CODE=/ {sub(/^__EC_BENCH_EXIT_CODE=/,"benchmark_exit_code=");emit();next}
@@ -294,6 +297,15 @@ export LD_LIBRARY_PATH="\$ECTRANS_HOME/lib:\${LD_LIBRARY_PATH:-}"
 export ECTRANS_BIN='$exe'
 export PATH="\$ECTRANS_HOME/bin:\$PATH"
 export OMP_NUM_THREADS='$cpu_threads'
+# 260717 wrqt begin 向单次allocation传入repeats、运行间隔、标签和日志目录
+series_repeats='$repeats'
+series_sleep_between='$sleep_between'
+series_label='$canonical_label'
+series_log_dir='$log_root/$device_kind'
+# 260717 wrqt end 向单次allocation传入repeats、运行间隔、标签和日志目录
+
+# 260717 wrqt begin 将单轮benchmark封装为可重复调用的函数
+run_benchmark() {
 echo compute_node=\$(hostname)
 echo CUDA_VISIBLE_DEVICES=\${CUDA_VISIBLE_DEVICES-}
 echo OMP_NUM_THREADS=\$OMP_NUM_THREADS
@@ -311,7 +323,32 @@ bench_end_stamp=\$("$perl_bin" -MTime::HiRes=gettimeofday -MPOSIX=strftime -e '(
 echo __EC_BENCH_END_EPOCH=\$bench_end_epoch
 echo __EC_BENCH_END_TIMESTAMP=\$bench_end_stamp
 echo __EC_BENCH_EXIT_CODE=\$bench_code
-exit "\$bench_code"
+return "\$bench_code"
+}
+# 260717 wrqt end 将单轮benchmark封装为可重复调用的函数
+
+# 260717 wrqt begin 在同一allocation内循环执行全部benchmark并分别写入日志
+for ((run_index=1;run_index<=series_repeats;++run_index)); do
+  idx=\$(printf '%02d' "\$run_index")
+  log_label="\${series_label}run\${idx}"
+  log_path="\$series_log_dir/\${log_label}.log"
+  echo __EC_RUN_BEGIN=\$log_label
+  set +e
+  run_benchmark 2>&1 | tee -a "\$log_path"
+  pipe_codes=("\${PIPESTATUS[@]}")
+  bench_code="\${pipe_codes[0]}"
+  if (( bench_code == 0 && pipe_codes[1] != 0 )); then
+    bench_code="\${pipe_codes[1]}"
+  fi
+  set -e
+  if (( bench_code != 0 )); then
+    exit "\$bench_code"
+  fi
+  if [[ "\$run_index" -lt "\$series_repeats" && "\$series_sleep_between" != "0" ]]; then
+    sleep "\$series_sleep_between"
+  fi
+done
+# 260717 wrqt end 在同一allocation内循环执行全部benchmark并分别写入日志
 EOF_INNER
 )
 cmd_text="$(join_args "${yhrun_cmd[@]}") bash -lc $(printf '%q' "$inner_script")"
@@ -338,6 +375,9 @@ if (( dry_run )); then
   exit 0
 fi
 
+# 260717 wrqt begin 申请资源前预建各轮日志并记录共用allocation
+submit_start_epoch=$(now_epoch)
+submit_start_stamp=$(now_stamp)
 for ((i=1;i<=repeats;++i)); do
   idx=$(printf '%02d' "$i")
   runid="${idx}/$(printf '%02d' "$repeats")"
@@ -346,9 +386,6 @@ for ((i=1;i<=repeats;++i)); do
   current_label="$log_label"
   current_runid="$runid"
   current_log_path="$log_path"
-  submit_start_epoch=$(now_epoch)
-  submit_start_stamp=$(now_stamp)
-  printf 'running        : %s\n' "$log_label"
   {
     printf '# label: %s\n' "$log_label"
     printf '# device: %s\n' "$device_kind"
@@ -367,73 +404,122 @@ for ((i=1;i<=repeats;++i)); do
     printf '# host: %s\n' "$host_name"
     printf '# pid: %s\n' "$$"
     printf '# live_output: 1\n'
+    printf '# allocation_reused: 1\n'
     printf '\n'
   } > "$log_path"
+done
+# 260717 wrqt end 申请资源前预建各轮日志并记录共用allocation
 
-  set +e
-  current_child_pid=""
-  "${yhrun_cmd[@]}" bash -lc "$inner_script" > >(tee -a "$log_path" | screen_progress_filter) 2>&1 &
-  current_child_pid=$!
-  wait "$current_child_pid"
-  yhrun_code=$?
-  current_child_pid=""
-  set -e
+# 260717 wrqt begin 只申请一次yhrun allocation并等待全部benchmark结束
+current_label="${canonical_label}run01"
+current_runid="01/$(printf '%02d' "$repeats")"
+current_log_path="$log_dir/${current_label}.log"
+set +e
+current_child_pid=""
+"${yhrun_cmd[@]}" bash -lc "$inner_script" > >(screen_progress_filter) 2>&1 &
+current_child_pid=$!
+wait "$current_child_pid"
+yhrun_code=$?
+current_child_pid=""
+set -e
 
-  submit_end_epoch=$(now_epoch)
-  submit_end_stamp=$(now_stamp)
-  submit_elapsed_ms=$(duration_ms "$submit_start_epoch" "$submit_end_epoch")
+submit_end_epoch=$(now_epoch)
+submit_end_stamp=$(now_stamp)
+allocation_elapsed_ms=$(duration_ms "$submit_start_epoch" "$submit_end_epoch")
+completed_runs=0
+series_code=0
+# 260717 wrqt end 只申请一次yhrun allocation并等待全部benchmark结束
+
+# 260717 wrqt begin 从各轮日志提取时间与退出状态并写入TSV
+for ((i=1;i<=repeats;++i)); do
+  idx=$(printf '%02d' "$i")
+  runid="${idx}/$(printf '%02d' "$repeats")"
+  log_label="${canonical_label}run${idx}"
+  log_path="$log_dir/${log_label}.log"
+  current_label="$log_label"
+  current_runid="$runid"
+  current_log_path="$log_path"
   bench_start_epoch=$(extract_marker_value "$log_path" "__EC_BENCH_START_EPOCH")
   bench_end_epoch=$(extract_marker_value "$log_path" "__EC_BENCH_END_EPOCH")
   benchmark_code=$(extract_marker_value "$log_path" "__EC_BENCH_EXIT_CODE")
   start_stamp=$(extract_marker_value "$log_path" "__EC_BENCH_START_TIMESTAMP")
   end_stamp=$(extract_marker_value "$log_path" "__EC_BENCH_END_TIMESTAMP")
+
+  if [[ -z "$benchmark_code" ]]; then
+    code="$yhrun_code"
+    (( code == 0 )) && code=1
+    elapsed_ms="$allocation_elapsed_ms"
+    submit_elapsed_ms="$allocation_elapsed_ms"
+    start_stamp="$submit_start_stamp"
+    end_stamp="$submit_end_stamp"
+    {
+      printf '\n# start_timestamp: %s\n' "$start_stamp"
+      printf '# end_timestamp: %s\n' "$end_stamp"
+      printf '# submit_end_timestamp: %s\n' "$submit_end_stamp"
+      printf '# duration_ms: %s\n' "$elapsed_ms"
+      printf '# submit_duration_ms: %s\n' "$submit_elapsed_ms"
+      printf '# benchmark_exit_code: %s\n' "$benchmark_code"
+      printf '# yhrun_exit_code: %s\n' "$yhrun_code"
+      printf '# exit_code: %s\n' "$code"
+    } >> "$log_path"
+    append_index_row "$runid" "$log_path" "$code" "$elapsed_ms" "$submit_elapsed_ms"
+    series_code="$code"
+    break
+  fi
+
+  completed_runs=$((completed_runs + 1))
   if [[ -n "$bench_start_epoch" && -n "$bench_end_epoch" ]]; then
     elapsed_ms=$(duration_ms "$bench_start_epoch" "$bench_end_epoch")
   else
     start_stamp="$submit_start_stamp"
     end_stamp="$submit_end_stamp"
-    elapsed_ms="$submit_elapsed_ms"
+    elapsed_ms="$allocation_elapsed_ms"
   fi
-  if [[ -n "$benchmark_code" ]]; then
-    code="$benchmark_code"
+  if (( i == 1 )) && [[ -n "$bench_end_epoch" ]]; then
+    submit_elapsed_ms=$(duration_ms "$submit_start_epoch" "$bench_end_epoch")
   else
-    code="$yhrun_code"
+    submit_elapsed_ms="$elapsed_ms"
   fi
+  code="$benchmark_code"
   {
     printf '\n# start_timestamp: %s\n' "$start_stamp"
     printf '# end_timestamp: %s\n' "$end_stamp"
-    printf '# submit_end_timestamp: %s\n' "$submit_end_stamp"
+    printf '# submit_end_timestamp: %s\n' "$end_stamp"
     printf '# duration_ms: %s\n' "$elapsed_ms"
     printf '# submit_duration_ms: %s\n' "$submit_elapsed_ms"
     printf '# benchmark_exit_code: %s\n' "$benchmark_code"
     printf '# yhrun_exit_code: %s\n' "$yhrun_code"
     printf '# exit_code: %s\n' "$code"
-    if [[ "$code" == "0" && "$yhrun_code" != "0" ]]; then
-      printf '# yhrun_warning: yhrun returned nonzero after benchmark success\n'
-    fi
   } >> "$log_path"
 
   append_index_row "$runid" "$log_path" "$code" "$elapsed_ms" "$submit_elapsed_ms"
-
-  if (( interrupted )); then
-    append_error_log "$terminate_reason"
-    write_task_index
-    printf '已写入%s\n' "$index_tsv"
-    printf '已写入%s\n' "$error_log"
-    exit 130
-  fi
-  if [[ "$code" == "0" && "$yhrun_code" != "0" ]]; then
-    append_error_log "调度层返回非零但benchmark成功:${log_label}yhrun_exit_code=${yhrun_code}benchmark_exit_code=${benchmark_code}"
-  fi
   if (( code != 0 )); then
-    append_error_log "运行失败:${log_label}exit_code=${code}"
-    write_task_index
-    printf '已写入%s\n' "$index_tsv"
-    printf '已写入%s\n' "$error_log"
-    exit "$code"
+    series_code="$code"
+    break
   fi
-  [[ "$i" -lt "$repeats" && "$sleep_between" != "0" ]] && sleep "$sleep_between"
 done
+# 260717 wrqt end 从各轮日志提取时间与退出状态并写入TSV
+
+# 260717 wrqt begin 汇总中断、运行失败和yhrun异常并写入任务索引
+if (( interrupted )); then
+  append_error_log "$terminate_reason"
+  write_task_index
+  printf '已写入%s\n' "$index_tsv"
+  printf '已写入%s\n' "$error_log"
+  exit 130
+fi
+if (( series_code != 0 )); then
+  append_error_log "运行失败:${current_label}exit_code=${series_code}"
+  write_task_index
+  printf '已写入%s\n' "$index_tsv"
+  printf '已写入%s\n' "$error_log"
+  exit "$series_code"
+fi
+if (( completed_runs == repeats && yhrun_code != 0 )); then
+  printf '# yhrun_warning: yhrun returned nonzero after benchmark success\n' >> "$current_log_path"
+  append_error_log "调度层返回非零但benchmark成功:${current_label}yhrun_exit_code=${yhrun_code}"
+fi
 
 write_task_index
 printf '已写入%s\n' "$index_tsv"
+# 260717 wrqt end 汇总中断、运行失败和yhrun异常并写入任务索引
