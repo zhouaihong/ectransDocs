@@ -1,0 +1,15 @@
+/*
+!/.gitignore
+!/doc/
+!/doc/**
+!/docs/
+!/docs/**
+!/env/
+!/env/**
+!/script/
+!/script/**
+__pycache__/
+*.py[cod]
+*.bak-*
+*.out
+*.txt

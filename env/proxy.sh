@@ -1,0 +1,2 @@
+proxy_on()  { source /APP/u22/ai_x86/toolshs/setproxy.sh 172.16.31.200 3138; }
+proxy_off() { unset http_proxy https_proxy ftp_proxy all_proxy; git config --global --unset http.proxy 2>/dev/null; git config --global --unset https.proxy 2>/dev/null; }
