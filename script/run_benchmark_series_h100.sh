@@ -280,7 +280,14 @@ args_text=$(join_args "${benchmark_cmd[@]}")
 parse_benchmark_args_metadata "${benchmark_args[@]}"
 
 cpu_cores_total=$((ntasks * cpu_threads))
-yhrun_cmd=(yhrun -p "$partition" -N "$nodes" -n 1 -c "$cpu_cores_total" -G "$gpus")
+# 260718 wrqt begin h100x显式申请H100资源，避免-G被调度器解析为A100
+if [[ "$partition" == "h100x" ]]; then
+  yhrun_gpu_args=(--gres="gpu:h100:${gpus}")
+else
+  yhrun_gpu_args=(-G "$gpus")
+fi
+yhrun_cmd=(yhrun -p "$partition" -N "$nodes" -n 1 -c "$cpu_cores_total" "${yhrun_gpu_args[@]}")
+# 260718 wrqt end h100x显式申请H100资源，避免-G被调度器解析为A100
 mpirun_cmd=(mpirun --oversubscribe -np "$ntasks" "${benchmark_cmd[@]}")
 printf -v mpirun_text '%q ' "${mpirun_cmd[@]}"
 mpirun_text=${mpirun_text% }
