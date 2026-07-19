@@ -15,6 +15,9 @@ repeats=1
 sleep_between=0
 target=""
 profile="release"
+# 260719 wrqt begin 记录可选的历史构建版本
+bin_version=""
+# 260719 wrqt end 记录可选的历史构建版本
 partition="${PARTITION:-h100x}"
 nodes=1
 ntasks=1
@@ -159,7 +162,9 @@ write_task_index() {
   tmp_index=$(mktemp "${TMPDIR:-/tmp}/ectrans.task_index.${device_kind}.XXXXXX")
   {
     printf '任务ID\t运行ID\t标签\t设备\t目标\t构建类型\t精度\tCPU线程数\tCPU总线程数\tGPU申请数\t预热次数\t迭代次数\t分区\t节点数\tMPI进程数\tcallmode\tgrid\ttruncation\tnfld\tnlev\tnproma\tnpromatr\tnprtrw\tnprtrv\t退出码\t耗时毫秒\t提交耗时毫秒\t日志路径\t参数\n'
-    [[ -f "$index_tsv" ]] && awk -F '\t' -v taskid="$taskid" 'NR>1&&$1!=taskid{print}' "$index_tsv"
+    # 260719 wrqt begin 按完整标签替换本次结果，保留相同任务编号的其他版本
+    [[ -f "$index_tsv" ]] && awk -F '\t' -v label="$canonical_label" 'NR>1&&$3!=label{print}' "$index_tsv"
+    # 260719 wrqt end 按完整标签替换本次结果，保留相同任务编号的其他版本
     local row
     for row in "${index_rows[@]}"; do
       printf '%s\n' "$row"
@@ -230,8 +235,15 @@ configure_target() {
     *) exit 2 ;;
   esac
   [[ -z "$gpus" ]] && gpus=1
-  exe="$repo_root/runs/bin/ectrans-benchmark-${device_kind}-${profile}-${precision_kind}"
-  install_home="$repo_root/install/ectrans-${device_kind}-${profile}"
+  # 260719 wrqt begin 指定版本时同时选择归档bin和对应install共享库
+  if [[ -n "$bin_version" ]]; then
+    exe="$repo_root/runs/bin/$bin_version/ectrans-benchmark-${device_kind}-${profile}-${precision_kind}"
+    install_home="$repo_root/install/${bin_version}-${device_kind}-${profile}"
+  else
+    exe="$repo_root/runs/bin/ectrans-benchmark-${device_kind}-${profile}-${precision_kind}"
+    install_home="$repo_root/install/ectrans-${device_kind}-${profile}"
+  fi
+  # 260719 wrqt end 指定版本时同时选择归档bin和对应install共享库
   index_tsv="$rundata_root/task_index_${device_kind}.tsv"
   error_log="$log_root/error_${device_kind}.log"
   [[ -r "$env_init" ]] || exit 1
@@ -246,6 +258,9 @@ while (( $# > 0 )); do
     --sleep-between) sleep_between="$2"; shift 2 ;;
     --target) target="$2"; shift 2 ;;
     --profile) profile="$2"; shift 2 ;;
+    # 260719 wrqt begin 接收runs/bin和install共用的版本标识
+    --bin-version) bin_version="$2"; shift 2 ;;
+    # 260719 wrqt end 接收runs/bin和install共用的版本标识
     --partition) partition="$2"; shift 2 ;;
     --nodes) nodes="$2"; shift 2 ;;
     --ntasks) ntasks="$2"; shift 2 ;;
@@ -367,6 +382,11 @@ printf 'label_base     : %s\n' "$canonical_label"
 printf 'device         : %s\n' "$device_kind"
 printf 'target         : %s\n' "$target"
 printf 'profile        : %s\n' "$profile"
+# 260719 wrqt begin 显示本次实际使用的版本、可执行文件和共享库目录
+printf 'bin_version    : %s\n' "${bin_version:-current}"
+printf 'bin             : %s\n' "$exe"
+printf 'install_home    : %s\n' "$install_home"
+# 260719 wrqt end 显示本次实际使用的版本、可执行文件和共享库目录
 printf 'cpu_threads    : %s\n' "$cpu_threads"
 printf 'cpu_threads_total: %s\n' "$cpu_cores_total"
 printf 'gpus_requested : %s\n' "$gpus"
@@ -398,6 +418,10 @@ for ((i=1;i<=repeats;++i)); do
     printf '# device: %s\n' "$device_kind"
     printf '# target: %s\n' "$target"
     printf '# profile: %s\n' "$profile"
+    # 260719 wrqt begin 把指定版本和共享库目录写入每轮标准日志
+    printf '# bin_version: %s\n' "${bin_version:-current}"
+    printf '# install_home: %s\n' "$install_home"
+    # 260719 wrqt end 把指定版本和共享库目录写入每轮标准日志
     printf '# cpu_threads: %s\n' "$cpu_threads"
     printf '# cpu_threads_total: %s\n' "$cpu_cores_total"
     printf '# gpus_requested: %s\n' "$gpus"
