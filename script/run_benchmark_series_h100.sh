@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 # type:sh
-# effect:H100顺序多次运行ectransbenchmark;日志写入runs/logs;索引写入runs/rundata;单task只重写一次TSV
-# 260726 release 标记任务索引与历史制品规范版本
-# version:60726_01
+# version:260726_01
 
 set -euo pipefail
 echome_default="/HOME/acict_hpjia/acict_hpjia_1/HDD_POOL/ectrans-dev"
@@ -572,7 +570,9 @@ export OMP_NUM_THREADS='$cpu_threads'
 series_repeats='$repeats'
 series_sleep_between='$sleep_between'
 series_label='$canonical_label'
-series_log_dir='$log_root/$device_kind/task$taskid'
+# 260806 ret begin 向allocation传入task_v2分级日志目录
+series_log_dir='$log_root/$device_kind/task_v2/task$taskid'
+# 260806 ret end 向allocation传入task_v2分级日志目录
 # 260717 wrqt end 向单次allocation传入repeats、运行间隔、标签和日志目录
 
 # 260717 wrqt begin 将单轮benchmark封装为可重复调用的函数
@@ -634,7 +634,9 @@ EOF_INNER
 cmd_text="$(join_args "${yhrun_cmd[@]}") bash -lc $(printf '%q' "$inner_script")"
 host_name=$(hostname)
 # 260726 ret begin 按任务ID分级保存全部运行日志
-log_dir="$log_root/$device_kind/task$taskid"
+# 260806 ret begin 把task100后的日志统一归入task_v2目录
+log_dir="$log_root/$device_kind/task_v2/task$taskid"
+# 260806 ret end 把task100后的日志统一归入task_v2目录
 # 260726 ret end
 
 printf 'label_base     : %s\n' "$canonical_label"
@@ -877,3 +879,7 @@ fi
 write_task_index
 printf '已写入%s\n' "$index_tsv"
 # 260717 wrqt end 汇总中断、运行失败和yhrun异常并写入任务索引
+
+# 260718 release 修正h100x资源类型申请
+# 260719 release 支持指定历史benchmark版本运行
+# 260726 release-latest 标记任务索引与历史制品规范版本
